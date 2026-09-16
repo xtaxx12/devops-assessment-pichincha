@@ -6,9 +6,11 @@ from fastapi.testclient import TestClient
 TEST_API_KEY = "2f5ae96c-b558-4c7b-a590-a501ae1c3f6c"
 TEST_JWT_SECRET = "test-secret-with-enough-length-for-hs256"
 
-os.environ.setdefault("API_KEY", TEST_API_KEY)
-os.environ.setdefault("JWT_SECRET", TEST_JWT_SECRET)
-os.environ.setdefault("JWT_TTL_SECONDS", "60")
+# Los tests deben ser deterministas: se fijan los valores antes de importar la app,
+# ignorando cualquier API_KEY/JWT_SECRET que el entorno (CI, .env) ya tuviera.
+os.environ["API_KEY"] = TEST_API_KEY
+os.environ["JWT_SECRET"] = TEST_JWT_SECRET
+os.environ["JWT_TTL_SECONDS"] = "60"
 
 from devops_service.main import create_app  # noqa: E402
 
