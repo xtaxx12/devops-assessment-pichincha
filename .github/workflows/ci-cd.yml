@@ -1,0 +1,195 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag de imagen a desplegar (ej. sha-abc1234, v1.0.0). Vacío = construir desde el commit actual"
+        required: false
+        default: ""
+      environment:
+        description: "Entorno destino"
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+env:
+  PYTHON_VERSION: "3.12"
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/devops-service
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  checks: write
+  pull-requests: write
+
+jobs:
+  lint:
+    name: Lint / análisis estático
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Ruff (lint)
+        run: ruff check . --output-format=github
+      - name: Ruff (format)
+        run: ruff format --check .
+      - name: Hadolint (Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+  test:
+    name: Tests + cobertura
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Pytest con cobertura
+        env:
+          API_KEY: ci-api-key
+          JWT_SECRET: ci-jwt-secret-with-at-least-32-characters!!
+        run: >
+          pytest --cov --cov-report=term-missing --cov-report=xml
+          --junitxml=reports/junit.xml
+      - name: Publicar reporte de cobertura
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            reports/junit.xml
+      - name: Resumen de tests en el PR
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: reports/junit.xml
+      - name: SonarCloud
+        if: ${{ env.SONAR_TOKEN != '' }}
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  build:
+    name: Build imagen Docker
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    if: github.event_name != 'workflow_dispatch' || inputs.version == ''
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Metadatos de imagen
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test del contenedor
+        env:
+          API_KEY: smoke-api-key
+          JWT_SECRET: smoke-jwt-secret-with-at-least-32-characters
+        run: |
+          IMAGE="${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+          docker run -d --name smoke -p 8000:8000 -e API_KEY -e JWT_SECRET "$IMAGE"
+          for i in $(seq 1 20); do curl -sf http://localhost:8000/health && break; sleep 1; done
+          JWT=$(curl -sf -X POST -H "X-Parse-REST-API-Key: $API_KEY" http://localhost:8000/api-manager/token | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+          BODY=$(curl -sf -X POST \
+            -H "X-Parse-REST-API-Key: $API_KEY" -H "X-JWT-KWY: $JWT" -H "Content-Type: application/json" \
+            -d '{ "message" : "This is a test", "to": "Juan Perez", "from": "Rita Asturia", "timeToLifeSec" : 45 }' \
+            http://localhost:8000/DevOps)
+          echo "$BODY"
+          test "$BODY" = '{"message":"Hello Juan Perez your message will be send"}'
+          test "$(curl -s -X GET http://localhost:8000/DevOps)" = "ERROR"
+          docker rm -f smoke
+
+  deploy-dev:
+    name: Deploy → development
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: >-
+      always() && needs.build.result != 'failure' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+        (github.event_name == 'workflow_dispatch' && inputs.environment == 'dev')
+      )
+    environment:
+      name: development
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/deploy
+        with:
+          overlay: dev
+          namespace: devops-service-dev
+          image: ${{ env.IMAGE_NAME }}
+          version: ${{ inputs.version || needs.build.outputs.image_tag }}
+          kube_config: ${{ secrets.KUBE_CONFIG }}
+          api_key: ${{ secrets.API_KEY }}
+          jwt_secret: ${{ secrets.JWT_SECRET }}
+
+  deploy-prod:
+    name: Deploy → production
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: >-
+      always() && needs.build.result != 'failure' &&
+      (
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) ||
+        (github.event_name == 'workflow_dispatch' && inputs.environment == 'prod')
+      )
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/deploy
+        with:
+          overlay: prod
+          namespace: devops-service
+          image: ${{ env.IMAGE_NAME }}
+          version: ${{ inputs.version || needs.build.outputs.image_tag }}
+          kube_config: ${{ secrets.KUBE_CONFIG }}
+          api_key: ${{ secrets.API_KEY }}
+          jwt_secret: ${{ secrets.JWT_SECRET }}

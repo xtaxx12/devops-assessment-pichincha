@@ -1,0 +1,82 @@
+name: Deploy to Kubernetes
+description: Aplica el overlay de kustomize indicado con la versión de imagen dada.
+
+inputs:
+  overlay:
+    description: Overlay de kustomize (dev | prod)
+    required: true
+  namespace:
+    description: Namespace destino
+    required: true
+  image:
+    description: Nombre de la imagen sin tag
+    required: true
+  version:
+    description: Tag de la imagen a desplegar
+    required: true
+  kube_config:
+    description: Kubeconfig en base64 (secret KUBE_CONFIG)
+    required: false
+    default: ""
+  api_key:
+    description: API key del microservicio (secret API_KEY)
+    required: true
+  jwt_secret:
+    description: Secreto JWT (secret JWT_SECRET)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Verificar credenciales del clúster
+      id: creds
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.kube_config }}" ]; then
+          echo "::warning::KUBE_CONFIG no configurado; se omite el despliegue real (dry-run)."
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Configurar kubectl
+      uses: azure/setup-kubectl@v4
+
+    - name: Configurar kubeconfig
+      if: steps.creds.outputs.enabled == 'true'
+      shell: bash
+      run: |
+        mkdir -p ~/.kube
+        echo "${{ inputs.kube_config }}" | base64 -d > ~/.kube/config
+        chmod 600 ~/.kube/config
+        kubectl cluster-info
+
+    - name: Configurar kustomize
+      uses: imranismail/setup-kustomize@v2
+
+    - name: Fijar versión de imagen
+      shell: bash
+      working-directory: infra/k8s/overlays/${{ inputs.overlay }}
+      run: kustomize edit set image "ghcr.io/OWNER/devops-service=${{ inputs.image }}:${{ inputs.version }}"
+
+    - name: Render de manifiestos (dry-run)
+      shell: bash
+      run: kustomize build infra/k8s/overlays/${{ inputs.overlay }}
+
+    - name: Crear/actualizar Secret
+      if: steps.creds.outputs.enabled == 'true'
+      shell: bash
+      run: |
+        kubectl create namespace "${{ inputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n "${{ inputs.namespace }}" create secret generic devops-service-secrets \
+          --from-literal=API_KEY="${{ inputs.api_key }}" \
+          --from-literal=JWT_SECRET="${{ inputs.jwt_secret }}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Aplicar manifiestos
+      if: steps.creds.outputs.enabled == 'true'
+      shell: bash
+      run: |
+        kubectl apply -k infra/k8s/overlays/${{ inputs.overlay }}
+        kubectl -n "${{ inputs.namespace }}" rollout status deployment/devops-service --timeout=180s
+        kubectl -n "${{ inputs.namespace }}" get pods,svc,hpa
