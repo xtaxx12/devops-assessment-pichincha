@@ -1,0 +1,39 @@
+[project]
+name = "devops-service"
+version = "1.0.0"
+description = "Microservicio REST /DevOps protegido con API Key y JWT por transacción"
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers"
+markers = [
+    "unit: pruebas unitarias sin levantar la aplicación",
+    "integration: pruebas de integración sobre la app HTTP",
+]
+
+[tool.coverage.run]
+source = ["src/devops_service"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "C4", "RET", "ARG", "PL", "RUF"]
+ignore = ["PLR2004"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR0913", "ARG001"]
+
+[tool.ruff.format]
+quote-style = "double"
