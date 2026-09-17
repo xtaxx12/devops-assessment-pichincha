@@ -6,8 +6,6 @@ Microservicio REST construido con **Python 3.12 + FastAPI**, desarrollado con **
 **Clean Code**, contenerizado con Docker, desplegado en Kubernetes con 2+ réplicas detrás de un
 balanceador de carga y con pipeline CI/CD completo en GitHub Actions.
 
-> Reemplaza `OWNER` por tu usuario/organización de GitHub en el badge, en
-> `infra/k8s/overlays/*/kustomization.yaml`, `infra/k8s/base/deployment.yaml` y `sonar-project.properties`.
 
 ## Tabla de contenidos
 
