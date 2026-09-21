@@ -62,3 +62,9 @@ def test_health_endpoint_is_public(client: TestClient):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_root_redirects_to_docs(client: TestClient):
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/docs"
