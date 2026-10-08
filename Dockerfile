@@ -20,13 +20,13 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH=/app/src \
     PORT=8000
 
-RUN groupadd --system app && useradd --system --gid app --no-create-home app
+RUN groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --no-create-home app
 
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=app:app src ./src
 
-USER app
+USER 10001
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
